@@ -10,8 +10,8 @@ from sklearn.model_selection import StratifiedGroupKFold, LeaveOneGroupOut
 mne.set_log_level("ERROR")
 
 # %% Parameters
-data_root = Path(__file__).resolve().parent.parent / "Project" / "dataset" / "faces_noise" / "data"
-subjects = ["ap", "ca", "ha", "ja", "mv", "wc", "zt"]
+data_root = r"C:\Users\Jonny\Neuromatch\Project\dataset\faces_basic\data"
+subjects = ["aa", "ap", "ca", "de", "fp", "ha", "ja", "jm", "jt", "mv", "rn", "rr", "wc", "zt"]
 
 notch = (60, 120, 180, 240)
 bandpass = None
