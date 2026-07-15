@@ -20,7 +20,7 @@ win_ms = (0, 400)
 
 # %% Raw and filter
 def to_raw(mat_path, notch=notch, bandpass=bandpass):
-    """Load a .mat file into a filtered MNE RawArray (ECoG + STIM), and return the mat dict."""
+    """Load a .mat file into an MNE RawArray and return the mat dict"""
     m = loadmat(mat_path)
     sf = float(np.ravel(m["srate"])[0])
     data = np.asarray(m["data"], dtype=float).T
@@ -36,12 +36,13 @@ def to_raw(mat_path, notch=notch, bandpass=bandpass):
         raw.notch_filter([f for f in notch if f < sf / 2], picks=picks)
     if bandpass:
         raw.filter(bandpass[0], bandpass[1], picks=picks)
+
     return raw, m
 
 
 # %% Run detection
 def _run_index(stim, onsets, min_gap_samples=2000):
-    """Assign each stimulus onset to a run using the stim==0 gaps between runs."""
+    """Assign each stimulus onset to a run using the stim==0 gaps between runs"""
     stim = np.asarray(stim).astype(int)
     chg = np.where(np.diff(stim) != 0)[0] + 1
     starts = np.concatenate([[0], chg])
@@ -51,13 +52,14 @@ def _run_index(stim, onsets, min_gap_samples=2000):
     run = np.zeros(len(onsets), dtype=int)
     for g in gap_starts:
         run[onsets > g] += 1
+
     return run
 
 
 # %% Epoching
 def preprocess(subject, task="faceshouses", root=data_root,
                notch=notch, bandpass=bandpass, win_ms=win_ms):
-    """Load, filter, and epoch one subject/task into MNE Epochs with metadata."""
+    """Load, filter, and epoch one subject/task into MNE epochs with metadata"""
     raw, m = to_raw(Path(root) / subject / f"{subject}_{task}.mat", notch, bandpass)
     sf = raw.info["sfreq"]
     stim = np.ravel(m["stim"]).astype(int)
@@ -89,6 +91,7 @@ def preprocess(subject, task="faceshouses", root=data_root,
     tmin, tmax = win_ms[0] / 1000.0, win_ms[1] / 1000.0 - 1.0 / sf
     ep = mne.Epochs(raw, events, tmin=tmin, tmax=tmax, baseline=None,
                     preload=True, picks="ecog", metadata=meta)
+    
     return ep
 
 
@@ -98,7 +101,7 @@ def _y(epochs):
 
 
 def leave_one_image_out(epochs, n_splits=5, seed=0):
-    """Group by stimulus id, stratified by category, holding out all repeats of test images."""
+    """Group by stimulus id, stratified by category, holding out all repeats of test images"""
     y = _y(epochs)
     groups = epochs.metadata["stim_id"].to_numpy()
     Xd = np.zeros((len(y), 1))
@@ -111,31 +114,5 @@ def leave_one_run_out(epochs):
     if len(np.unique(groups)) < 2:
         raise ValueError("only one run present (e.g. subject ha) - leave-one-run-out N/A")
     Xd = np.zeros((len(groups), 1))
+
     return list(LeaveOneGroupOut().split(Xd, groups=groups))
-
-
-# %% CLI
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--subject", default="ca")
-    ap.add_argument("--task", default="faceshouses", choices=["faceshouses", "fhnoisy"])
-    ap.add_argument("--bandpass", nargs=2, type=float, default=None)
-    ap.add_argument("--save", action="store_true")
-    args = ap.parse_args()
-
-    ep = preprocess(args.subject, args.task, bandpass=tuple(args.bandpass) if args.bandpass else None)
-    print(ep)
-    print(ep.metadata.head())
-    print(f"n_trials={len(ep)}  n_channels={len(ep.ch_names)}  times={ep.times[0]:.3f}..{ep.times[-1]:.3f}s")
-    if args.task == "faceshouses":
-        splits = leave_one_image_out(ep)
-        print(f"leave-one-image-out: {len(splits)} folds; "
-              f"fold0 train={len(splits[0][0])} test={len(splits[0][1])}")
-        sid = ep.metadata["stim_id"].to_numpy()
-        tr, te = splits[0]
-        print(f"fold0 image overlap train/test = {len(set(sid[tr]) & set(sid[te]))}")
-    if args.save:
-        out = Path(__file__).resolve().parent / f"{args.subject}_{args.task}-epo.fif"
-        ep.save(out, overwrite=True)
-        print(f"saved {out}")
