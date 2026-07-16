@@ -7,8 +7,6 @@ import mne
 from scipy.io import loadmat
 from sklearn.model_selection import StratifiedGroupKFold, LeaveOneGroupOut
 
-import detect_bad_channels as dbc
-
 mne.set_log_level("ERROR")
 
 # %% Parameters
@@ -19,52 +17,17 @@ DATASETS = {
     "faces_basic": Path(r"C:\Users\Jonny\Neuromatch\Project\dataset\faces_basic\data"),
     "faces_noise": Path(r"C:\Users\Jonny\Neuromatch\Project\dataset\faces_noise\data"),
 }
+SUBJECTS = {
+    "faces_basic": ["aa", "ap", "ca", "de", "fp", "ha", "ja", "jm", "jt", "mv", "rn", "rr", "wc", "zt"],
+    "faces_noise": ["ap", "ca", "ha", "ja", "mv", "wc", "zt"],
+}
 DATASET = "faces_basic"
 data_root = DATASETS[DATASET]
-subjects = dbc.DATASETS[DATASET]
+subjects = SUBJECTS[DATASET]
 
 notch = (60, 120, 180, 240)
 bandpass = None
 win_ms = (0, 400)
-
-# %% Bad channels
-# Curated bad-electrode lists (0-based, matching the ecogN channel names and the #N labels in
-# faces_basic_all_subjects_full_traces.png). These are the confident calls from
-# detect_bad_channels.py, cross-checked against visual inspection of the full-run traces.
-# A channel bad in ANY run is dropped for the WHOLE subject (union), so every trial keeps the
-# same channel set -- required by the fixed-feature decoders. Edit freely as review continues.
-#
-# Criteria per channel: DEAD = variance far below montage (invisible on the z-scored plot);
-# SPIKY = epileptiform / regular-spiking (high kurtosis); NOISY+iso = hyper-variance AND
-# decoupled from neighbours. See detect_bad_channels.py for thresholds.
-MANUAL_BADS = {
-    "aa": [0, 33, 41],                                  # 0,41 spiky; 33 dead
-    "ap": [40],                                         # dead (also dead in faces_noise)
-    "de": [13],                                         # dead (hidden by plot normalisation)
-    "fp": [1, 2],                                       # hyper-variance + decoupled, all runs
-    "ja": [37, 39, 51],                                 # regular spiking, all runs
-    "jt": [31, 64, 65, 66, 67, 68, 69, 91, 96],         # decoupled hyper-noise/spiky bank
-    # Candidates left IN pending eye-test (uncomment to drop):
-    #   "aa": +[20]          # noisy in run 3 only
-    #   "jt": +[50, 101]     # 50 high-variance but coupled ("dense"); 101 bad in run 1 only
-    #   "rr": [2,3,4,5,33,34,35,36]  # elevated/epileptiform late in run 2 only (2 runs total)
-    #   "zt": [3]            # mildly high-variance
-    # ha: NOT channel drops -- whole-montage <1 Hz baseline drift; high-pass/detrend instead.
-}
-
-# Whole-montage dropouts to reject as time windows (not channel drops). Auto-detected too;
-# listed here for documentation. jm: all channels rail ~256.2-261.3 s in run 3.
-
-
-def _bad_channels(subject, dataset, root, task, bads):
-    """Resolve the `bads` argument to a concrete list of 0-based channel indices."""
-    if bads is None:
-        return []
-    if bads == "manual":
-        return list(MANUAL_BADS.get(subject, []))
-    if bads == "auto":
-        return dbc.bad_channels(subject, dataset=dataset, task=task)
-    return list(bads)                                   # explicit iterable of indices
 
 
 # %% Raw and filter
@@ -107,32 +70,12 @@ def _run_index(stim, onsets, min_gap_samples=2000):
 
 # %% Epoching
 def preprocess(subject, task="faceshouses", dataset=DATASET, root=None,
-               notch=notch, bandpass=bandpass, win_ms=win_ms, bads="manual"):
-    """Load, filter, mark/drop bad electrodes, and epoch one subject/task into MNE Epochs.
-
-    bads : "manual" (curated MANUAL_BADS, default) | "auto" (detect_bad_channels) |
-           None (keep all) | explicit iterable of 0-based channel indices.
-           Dropped channels are recorded in raw.info["bads"] before being removed, so the
-           set is auditable. Whole-montage dropout windows are marked as BAD_dropout
-           annotations and any epoch overlapping them is rejected.
-    """
+               notch=notch, bandpass=bandpass, win_ms=win_ms):
+    """Load, filter, and epoch one subject/task into MNE Epochs with metadata"""
     root = Path(root) if root is not None else DATASETS[dataset]
     raw, m = to_raw(root / subject / f"{subject}_{task}.mat", notch, bandpass)
     sf = raw.info["sfreq"]
     stim = np.ravel(m["stim"]).astype(int)
-
-    # ---- bad channels: mark then drop (union across runs) ----
-    bad_idx = _bad_channels(subject, dataset, root, task, bads)
-    bad_names = [f"ecog{i}" for i in bad_idx if i < mne.pick_types(raw.info, ecog=True).size]
-    raw.info["bads"] = bad_names
-    if bad_names:
-        raw.drop_channels(bad_names)
-
-    # ---- whole-montage dropout windows -> annotations (rejected during epoching) ----
-    for seg in dbc.global_rail_segments(np.asarray(m["data"], float), stim, sf):
-        raw.set_annotations(raw.annotations + mne.Annotations(
-            onset=seg["t0_s"], duration=max(seg["dur_s"], 1.0 / sf), description="BAD_dropout"))
-
     events = mne.find_events(raw, stim_channel="STIM", consecutive=True)
 
     if task == "faceshouses":
@@ -160,8 +103,7 @@ def preprocess(subject, task="faceshouses", dataset=DATASET, root=None,
 
     tmin, tmax = win_ms[0] / 1000.0, win_ms[1] / 1000.0 - 1.0 / sf
     ep = mne.Epochs(raw, events, tmin=tmin, tmax=tmax, baseline=None,
-                    preload=True, picks="ecog", metadata=meta,
-                    reject_by_annotation=True)
+                    preload=True, picks="ecog", metadata=meta)
 
     return ep
 
