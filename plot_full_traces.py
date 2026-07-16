@@ -1,23 +1,10 @@
 """Full-run traces for every electrode of every subject, in one tall PNG.
 
-Supersedes scripts/plot_faces_basic_full_traces.py. The old figure robust-z-scored each
-channel and hard-clipped it, which made it unusable for spotting amplitude faults: a dead
-channel was amplified until it looked normal, a hyper-noisy channel was squashed. This
-version keeps the per-channel normalisation (so shape is readable) but makes the figure
-*valid for bad-electrode identification*:
-
-  * each channel label carries its NATIVE robust SD, so dead/quiet (tiny SD) and hyper
-    (huge SD) channels are identifiable despite the normalisation;
-  * channels flagged by detect_bad_channels are drawn in a fault colour and their fault is
-    printed next to the label, per run;
-  * run boundaries are drawn as vertical lines and whole-montage dropout windows are shaded,
-    so per-run faults are visible.
-
-Two scalings (push both):
-  * z-scored (default): each channel robust-z-scored to fill its lane -> read the PATTERN;
-    amplitude is normalised away, so a dead channel looks like scaled-up noise.
+Offset stack, one coloured block per subject, every channel labelled on both sides with its
+native robust SD. Two scalings (push both):
+  * z-scored (default): each channel robust-z-scored to fill its lane -> read the PATTERN.
   * raw (--no-zscore): per-subject common gain -> amplitude is honest, so tiny-variance
-    (dead) channels are visibly tiny and loud channels overflow their lane.
+    channels are visibly small and loud channels fill their lane.
 
     python plot_full_traces.py --dataset faces_basic --both
 """
@@ -26,31 +13,50 @@ import argparse
 
 import numpy as np
 import scipy.io as sio
+from scipy.signal import iirnotch, filtfilt
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import detect_bad_channels as dbc
+DATA_ROOT = Path(__file__).resolve().parent.parent / "dataset"
+DATASETS = {
+    "faces_basic": ["aa", "ap", "ca", "de", "fp", "ha", "ja", "jm", "jt", "mv", "rn", "rr", "wc", "zt"],
+    "faces_noise": ["ap", "ca", "ha", "ja", "mv", "wc", "zt"],
+}
+NOTCH_FREQS = (60.0, 120.0, 180.0, 240.0)
+NOTCH_Q = 30.0
 
 SPACING = 5.0
 SUBJ_GAP = 4 * SPACING
 TARGET_PTS = 40000
 LABELSIZE = 13          # electrode-label font size (left and right)
 ROW_INCHES = 0.36       # vertical space per channel; must fit LABELSIZE without collisions
-FAULT_COLOR = {"CLIP": "#c0392b", "FLAT": "#c0392b", "DEAD": "#8e6bbf",
-               "SPIKY": "#e07b39", "NOISY": "#d4a017"}
 
 
-def _fault(tags):
-    for key in ("CLIP", "FLAT", "DEAD", "SPIKY", "NOISY"):
-        if key in tags:
-            return key
-    return None
+def _notch(x, sf):
+    for f0 in NOTCH_FREQS:
+        if f0 < sf / 2:
+            b, a = iirnotch(f0, NOTCH_Q, sf)
+            x = filtfilt(b, a, x, axis=0)
+    return x
+
+
+def _run_bounds(stim, min_gap_samples=2000):
+    """Sample [start, end) of each run, from the stim==0 gaps; drop the all-zero tail."""
+    stim = np.asarray(stim).ravel().astype(int)
+    chg = np.where(np.diff(stim) != 0)[0] + 1
+    starts = np.concatenate([[0], chg])
+    ends = np.concatenate([chg, [len(stim)]])
+    gaps = [(s, e) for s, e in zip(starts, ends)
+            if stim[s] == 0 and (e - s) >= min_gap_samples and 1000 < s < len(stim) - 1000]
+    bnds = [0] + [(s + e) // 2 for s, e in gaps] + [len(stim)]
+    segs = [(bnds[i], bnds[i + 1]) for i in range(len(bnds) - 1)]
+    return [(a, b) for a, b in segs if ((stim[a:b] >= 1) & (stim[a:b] <= 100)).any()]
 
 
 def main(dataset, zscore=True):
-    root = dbc.DATA_ROOT / dataset / "data"
-    subs = dbc.DATASETS[dataset]
+    root = DATA_ROOT / dataset / "data"
+    subs = DATASETS[dataset]
     files = [root / s / f"{s}_faceshouses.mat" for s in subs]
 
     n_chan_total = 0
@@ -63,14 +69,12 @@ def main(dataset, zscore=True):
     base_colors = plt.cm.tab20(np.linspace(0, 1, 20))
 
     y, xmax = 0.0, 0.0
-    yt_pos, yt_lab, yt_col = [], [], []
+    yt_pos, yt_lab = [], []
     for si, (s, f) in enumerate(zip(subs, files)):
         m = sio.loadmat(f)
         d = m["data"].astype(np.float64); sr = int(m["srate"][0, 0]); n = d.shape[0]
-        dd = dbc._notch(d, sr)
-        rows, segments, drift = dbc.detect_subject(s, dataset)
-        tag_by = {(int(r["run"]), int(r["ch"])): r["tags"] for r in rows}
-        runs = dbc.run_bounds(m["stim"])
+        dd = _notch(d, sr)
+        runs = _run_bounds(m["stim"])
 
         stride = max(1, n // TARGET_PTS)
         t = np.arange(n) / sr
@@ -82,9 +86,8 @@ def main(dataset, zscore=True):
             z = np.clip((dd - mu) / sd_safe, -SPACING * 0.55, SPACING * 0.55)
         else:
             # per-SUBJECT common gain: one gain for all channels so amplitude is honest.
-            # Scale to the 90th-percentile SD (not the median) so loud channels fill their
-            # lane without overrunning neighbours, and a tiny-variance (dead) channel is
-            # visibly small. Each subject is scaled to its own montage.
+            # Scale to the 90th-percentile SD so loud channels fill their lane without
+            # overrunning neighbours, and a tiny-variance channel is visibly small.
             gain = SPACING * 0.55 / np.percentile(sd_safe, 90)
             z = np.clip((dd - mu) * gain, -SPACING * 0.62, SPACING * 0.62)
         xmax = max(xmax, t[-1])
@@ -92,63 +95,40 @@ def main(dataset, zscore=True):
         col = base_colors[si % 20]
 
         for ch in range(d.shape[1]):
-            # draw run-by-run so a channel bad in only some runs is coloured only there
-            ch_fault = None
-            for ri, (a, b) in enumerate(runs, start=1):
-                sl = slice(a, b, stride)
-                fault = _fault(tag_by.get((ri, ch), ""))
-                c = FAULT_COLOR[fault] if fault else col
-                lw = 0.5 if fault else 0.3
-                ax.plot(t[sl], z[a:b:stride, ch] + y, lw=lw, color=c, rasterized=True)
-                ch_fault = ch_fault or fault
-            lab = f"{s}#{ch} sd={sd[ch]:.0f}" + (f" {ch_fault}" if ch_fault else "")
-            yt_pos.append(y); yt_lab.append(lab)
-            yt_col.append(FAULT_COLOR[ch_fault] if ch_fault else "black")
+            ax.plot(t[::stride], z[::stride, ch] + y, lw=0.3, color=col, rasterized=True)
+            yt_pos.append(y); yt_lab.append(f"{s}#{ch} sd={sd[ch]:.0f}")
             y += SPACING
 
         for a, b in runs[1:]:                              # run boundaries
             ax.plot([a / sr, a / sr], [block_start - 2, y - SPACING + 2], color="k", lw=0.4, alpha=0.3)
-        for seg in segments:                               # dropout windows
-            ax.axvspan(seg["t0_s"], seg["t1_s"], ymin=0, ymax=1, color="red", alpha=0.06)
-        note = f"{s}\n{d.shape[1]} ch\n{n/sr:.0f}s"
-        if drift["global_drift"]:
-            note += "\nDRIFT"
         ax.axhline(y + SUBJ_GAP * 0.5, color="k", lw=0.8, alpha=0.4)
-        ax.text(-0.010 * t[-1], (block_start + y - SPACING) / 2, note,
+        ax.text(-0.010 * t[-1], (block_start + y - SPACING) / 2,
+                f"{s}\n{d.shape[1]} ch\n{n/sr:.0f}s",
                 ha="right", va="center", fontsize=14, fontweight="bold", color=col)
         y += SUBJ_GAP
 
     ax.set_ylim(-SUBJ_GAP, y); ax.set_xlim(0, xmax); ax.invert_yaxis()
-    # electrode labels on BOTH sides, enlarged and fault-coloured
-    ax.set_yticks(yt_pos)
-    ax.set_yticklabels(yt_lab, fontsize=LABELSIZE)
-    for lab, c in zip(ax.get_yticklabels(), yt_col):
-        lab.set_color(c)
+    # electrode labels on BOTH sides, enlarged
+    ax.set_yticks(yt_pos); ax.set_yticklabels(yt_lab, fontsize=LABELSIZE)
     ax.tick_params(axis="y", length=2, pad=1)
     axr = ax.twinx()
-    axr.set_ylim(ax.get_ylim())                        # mirror inverted range
-    axr.set_yticks(yt_pos)
-    axr.set_yticklabels(yt_lab, fontsize=LABELSIZE)
-    for lab, c in zip(axr.get_yticklabels(), yt_col):
-        lab.set_color(c)
+    axr.set_ylim(ax.get_ylim())                            # mirror inverted range
+    axr.set_yticks(yt_pos); axr.set_yticklabels(yt_lab, fontsize=LABELSIZE)
     axr.tick_params(axis="y", length=2, pad=1)
     ax.set_xlabel("time (s)", fontsize=22); ax.tick_params(axis="x", labelsize=16)
-    scale = ("robust z-scored per channel (amplitude normalised - read PATTERN, not size)"
-             if zscore else
-             "per-subject common gain (amplitude HONEST - dead channels look tiny, loud overflow)")
-    ax.set_title(f"{dataset} full-run traces (60/120/180/240 Hz notch, offset). {scale}. "
-                 f"Fault-coloured by detect_bad_channels; label shows native SD. "
-                 f"purple=dead orange=spiky yellow=noisy red=clip; shaded=dropout", fontsize=20)
+    scale = "robust z-scored per channel" if zscore else "per-subject common gain"
+    ax.set_title(f"{dataset} full-run traces (60/120/180/240 Hz notch, {scale}, offset)",
+                 fontsize=20)
     ax.margins(x=0); plt.tight_layout()
     suffix = "zscored" if zscore else "raw"
     out = Path(__file__).resolve().parent / f"{dataset}_all_subjects_full_traces_{suffix}.png"
-    fig.savefig(out, dpi=96 if zscore else 84)          # raw kept <100 MB (GitHub hard limit)
+    fig.savefig(out, dpi=96 if zscore else 84)             # raw kept <100 MB (GitHub hard limit)
     print("saved", out, f"{Path(out).stat().st_size/1e6:.0f} MB")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", default="faces_basic", choices=list(dbc.DATASETS))
+    ap.add_argument("--dataset", default="faces_basic", choices=list(DATASETS))
     ap.add_argument("--no-zscore", dest="zscore", action="store_false",
                     help="per-subject common gain instead of per-channel z-score")
     ap.add_argument("--both", action="store_true", help="render both zscored and raw")
