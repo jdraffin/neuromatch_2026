@@ -29,6 +29,121 @@ notch = (60, 120, 180, 240)
 bandpass = None
 win_ms = (0, 400)
 
+# %% Exclusions (edit by hand)
+# Electrodes to exclude, at subject x electrode x run x trial granularity. Nested dict:
+#     { subject: { electrode : where } }
+# electrode = 0-based channel index (matches ecogN and the #N labels in the trace figures).
+# where     = one of three forms, coarse to fine:
+#     "all"              -> excluded everywhere.
+#     [0, 2]             -> excluded in whole runs 0 and 2 (0-based run numbers).
+#     {2: [(34, 53)]}    -> excluded only in run 2, trials 34-53. Trials are run-local and
+#                           0-based (they restart each run), matching the trial ticks drawn
+#                           above each subject block by plot_full_traces.py, so a number read
+#                           off that figure can be pasted straight in. Each entry is a single
+#                           index or an inclusive (start, end) range. A run may also map to
+#                           "all" for the whole run.
+#
+# A range may open with "start" and close with "end", meaning the run's own boundary rather
+# than merely its first/last trial: ("start", 6) also covers the interval BEFORE trial 0, and
+# (34, "end") also covers the interval AFTER the last trial. For epoching that changes nothing
+# (an epoch only exists at a trial), but it is the honest record of where the electrode is
+# actually unusable, it is what the trace figure shades, and it matters if the continuous data
+# either side of the trials is ever analysed. Prefer it to a bare 0 / last-trial index.
+#
+#   EXCLUDE_CHANNELS = {
+#       "jt": {64: "all", 65: [1]},                 # 64 everywhere; 65 in the whole of run 1.
+#       "aa": {41: {0: [(0, 6)], 2: [(23, 37)]}},   # 41 only in those trial ranges of runs 0 and 2.
+#   }
+#
+# How it is applied (epochs are a fixed trials x channels x time array, so a channel cannot be
+# present for some trials and absent for others):
+#   * excluded on EVERY kept trial -> the channel is DROPPED for the whole subject.
+#   * excluded on only SOME trials -> the channel is KEPT, but those electrode x trial cells
+#     are NaN'd (PARTIAL_ACTION="nan", the default) or left intact ("mask"); either way each
+#     trial lists its excluded channels in epochs.metadata["exclude_channels"].
+EXCLUDE_CHANNELS = {
+    # Read off faces_basic_all_subjects_full_traces_{raw,zscored}.png by hand.
+    "aa": {
+        0:  {2: [(34, 53)]},
+        7:  {2: [(34, 38)]},
+        20: {2: [(34, "end")]},
+        25: {2: [(33, 35)]},
+        41: {0: [("start", 6)], 1: [("start", 6), (92, "end")], 2: [("start", 5), (23, 37)]},
+    },
+    "ja": {37: "all", 38: "all"},
+    "jt": {65: "all", 67: "all", 91: "all", 96: "all"},
+    "wc": {26: "all", 28: "all"},
+}
+PARTIAL_ACTION = "nan"        # "nan" = NaN partial-run excluded cells; "mask" = annotate only
+
+# Whole runs to exclude, per subject: 0-based run numbers. Every trial in a listed run is
+# dropped (use for a run ruined across all electrodes, not a single bad electrode - that is
+# EXCLUDE_CHANNELS).
+EXCLUDE_RUNS = {
+    # "rr": [1],      # drop the 2nd run
+}
+
+# Individual trials to exclude, per subject and run: { subject: { run : trials } }
+# run    = 0-based run number (matches the "run" column in epochs.metadata).
+# trials = 0-based trial numbers *within that run* (run-local, so the first trial of every
+#          run is 0). Each entry is either a single index or an inclusive (start, end) range.
+# The listed trials are dropped entirely, like EXCLUDE_RUNS but at finer granularity (use for
+# a stretch of a run ruined across all electrodes, e.g. the subject moving or an amp glitch).
+#
+#   EXCLUDE_TRIALS = {
+#       "rr": {0: [(10, 19)], 1: [3, 7, (40, 44)]},   # run 0: trials 10-19; run 1: 3, 7 and 40-44.
+#   }
+EXCLUDE_TRIALS = {
+    "jm": {2: [(87, 95)]},
+}
+
+
+def _expand_trials(trials, last=None):
+    """Expand a trial spec (ints and inclusive (start, end) ranges) into a set of indices.
+
+    A range may open with "start" (the run's first trial) and close with "end" (its last);
+    `last` supplies that final index. For epochs those sentinels are just trial 0 and the last
+    trial, but they additionally mean "reach the run's own boundary" - see the note on
+    EXCLUDE_CHANNELS about the pre-first-trial and post-last-trial intervals.
+    """
+    out = set()
+    for item in trials:
+        if isinstance(item, (tuple, list)):
+            start, end = item
+            start = 0 if start == "start" else int(start)
+            if end == "end":
+                if last is None:
+                    raise ValueError('"end" used where the run length is unknown')
+                end = last
+            out.update(range(start, int(end) + 1))
+        else:
+            out.add(int(item))
+
+    return out
+
+
+def _channel_trial_mask(where, runs, trial_in_run, run_last):
+    """Bool mask over trials: is this electrode excluded on each trial?
+
+    `where` is an EXCLUDE_CHANNELS value ("all" | [runs] | {run: trials}).
+    """
+    if isinstance(where, str):
+        if where != "all":
+            raise ValueError(f"bad EXCLUDE_CHANNELS value {where!r}")
+        return np.ones(len(runs), dtype=bool)
+    if isinstance(where, dict):
+        mask = np.zeros(len(runs), dtype=bool)
+        for run, trials in where.items():
+            in_run = runs == run
+            if isinstance(trials, str) and trials == "all":
+                mask |= in_run
+            else:
+                sel = _expand_trials(trials, run_last.get(run))
+                mask |= in_run & np.isin(trial_in_run, list(sel))
+        return mask
+
+    return np.isin(runs, list(where))            # list of whole runs
+
 
 # %% Raw and filter
 def to_raw(mat_path, notch=notch, bandpass=bandpass):
@@ -70,12 +185,31 @@ def _run_index(stim, onsets, min_gap_samples=2000):
 
 # %% Epoching
 def preprocess(subject, task="faceshouses", dataset=DATASET, root=None,
-               notch=notch, bandpass=bandpass, win_ms=win_ms):
-    """Load, filter, and epoch one subject/task into MNE Epochs with metadata"""
+               notch=notch, bandpass=bandpass, win_ms=win_ms,
+               exclude_channels=None, exclude_runs=None, exclude_trials=None, partial=None):
+    """Load, filter, and epoch one subject/task into MNE Epochs with metadata.
+
+    exclude_channels : {electrode: runs} for this subject (electrode 0-based; runs a list of
+                   0-based run numbers or "all"). None -> EXCLUDE_CHANNELS.get(subject, {}).
+                   Excluded-in-all-runs electrodes are dropped; excluded-in-some-runs
+                   electrodes are kept and those trials NaN'd/annotated (see `partial`).
+    exclude_runs : 0-based run numbers whose trials to drop entirely. None -> EXCLUDE_RUNS.
+    exclude_trials : {run: trials} for this subject, where trials are run-local 0-based trial
+                   numbers given as single indices and/or inclusive (start, end) ranges.
+                   Those trials are dropped. None -> EXCLUDE_TRIALS.get(subject, {}).
+    partial      : "nan" | "mask" for excluded-in-some-runs electrodes. None -> PARTIAL_ACTION.
+
+    epochs.metadata gains an "exclude_channels" column: per trial, the channel names flagged
+    for exclusion in that trial's run.
+    """
     root = Path(root) if root is not None else DATASETS[dataset]
     raw, m = to_raw(root / subject / f"{subject}_{task}.mat", notch, bandpass)
     sf = raw.info["sfreq"]
     stim = np.ravel(m["stim"]).astype(int)
+    n_ecog = len(mne.pick_types(raw.info, ecog=True))
+    spec = EXCLUDE_CHANNELS.get(subject, {}) if exclude_channels is None else exclude_channels
+    partial = PARTIAL_ACTION if partial is None else partial
+
     events = mne.find_events(raw, stim_channel="STIM", consecutive=True)
 
     if task == "faceshouses":
@@ -101,9 +235,57 @@ def preprocess(subject, task="faceshouses", dataset=DATASET, root=None,
     else:
         raise ValueError(task)
 
+    # ---- exclude whole runs, then individual trials within a run (drop their trials) ----
+    # trial index within its run, before any dropping, so hand-listed numbers stay stable
+    trial_in_run = meta.groupby("run").cumcount()
+    run_last = trial_in_run.groupby(meta["run"]).max().to_dict()   # last trial index of each run
+
+    drop_runs = EXCLUDE_RUNS.get(subject, []) if exclude_runs is None else exclude_runs
+    keep = ~meta["run"].isin(drop_runs) if drop_runs else pd.Series(True, index=meta.index)
+
+    drop_trials = EXCLUDE_TRIALS.get(subject, {}) if exclude_trials is None else exclude_trials
+    for run, trials in drop_trials.items():
+        sel = _expand_trials(trials, run_last.get(run))
+        keep &= ~((meta["run"] == run) & trial_in_run.isin(sel))
+
+    events = events[keep.to_numpy()]
+    meta = meta[keep].reset_index(drop=True)
+    trial_in_run = trial_in_run[keep].to_numpy()          # run-local ids of the surviving trials
+
+    # ---- resolve excluded electrodes into whole-channel drops vs per-trial NaNs ----
+    runs_arr = meta["run"].to_numpy()
+    excl_mask = {}                                        # {electrode: bool mask over trials}
+    for elec, where in spec.items():
+        if not (0 <= elec < n_ecog):
+            continue
+        mask = _channel_trial_mask(where, runs_arr, trial_in_run, run_last)
+        if mask.any():
+            excl_mask[elec] = mask
+
+    # excluded on every surviving trial -> the channel is useless, drop it outright
+    drop_names = [f"ecog{e}" for e, mask in excl_mask.items() if mask.all()]
+    raw.info["bads"] = drop_names
+    if drop_names:
+        raw.drop_channels(drop_names)
+    partial_cells = {e: mask for e, mask in excl_mask.items() if not mask.all()}
+
+    # per-trial list of channels excluded on that trial
+    excl_per_trial = [[] for _ in range(len(meta))]
+    for elec, mask in partial_cells.items():
+        for i in np.flatnonzero(mask):
+            excl_per_trial[i].append(f"ecog{elec}")
+    meta["exclude_channels"] = excl_per_trial
+
     tmin, tmax = win_ms[0] / 1000.0, win_ms[1] / 1000.0 - 1.0 / sf
     ep = mne.Epochs(raw, events, tmin=tmin, tmax=tmax, baseline=None,
                     preload=True, picks="ecog", metadata=meta)
+
+    # NaN the partially-excluded electrode x trial cells
+    if partial == "nan" and partial_cells:
+        for elec, mask in partial_cells.items():
+            name = f"ecog{elec}"
+            if name in ep.ch_names:
+                ep._data[mask, ep.ch_names.index(name), :] = np.nan
 
     return ep
 
