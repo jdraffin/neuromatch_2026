@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import mne
 from scipy.io import loadmat
-from sklearn.model_selection import StratifiedGroupKFold, LeaveOneGroupOut
+from sklearn.model_selection import LeaveOneGroupOut
 
 mne.set_log_level("ERROR")
 
@@ -71,7 +71,7 @@ EXCLUDE_CHANNELS = {
         41: {0: [("start", 6)], 1: [("start", 6), (92, "end")], 2: [("start", 5), (23, 37)]},
     },
     "ja": {37: "all", 38: "all"},
-    "jt": {65: "all", 67: "all", 91: "all", 96: "all"},
+    "jt": {64: "all", 65: "all", 66: "all", 67: "all", 68: "all", 69: "all", 91: "all", 96: "all"},
     "wc": {26: "all", 28: "all"},
 }
 PARTIAL_ACTION = "nan"        # "nan" = NaN partial-run excluded cells; "mask" = annotate only
@@ -295,12 +295,30 @@ def _y(epochs):
     return (epochs.metadata["category"].to_numpy() == "face").astype(int)
 
 
+# Fixed 5-fold image-identity CV split, stratified by category (10 houses and 10 faces per fold).
+# Hardcoded from fixed_image_identity_cv_folds.csv (Diana's file)
+IMAGE_CV_FOLDS = {
+    1: [5, 10, 13, 22, 23, 27, 31, 32, 33, 46, 54, 55, 61, 63, 68, 78, 81, 86, 95, 100],
+    2: [1, 9, 11, 19, 21, 25, 29, 39, 43, 45, 51, 62, 69, 70, 73, 74, 79, 84, 93, 99],
+    3: [3, 14, 15, 16, 20, 24, 37, 38, 48, 49, 56, 57, 58, 64, 65, 77, 87, 90, 96, 97],
+    4: [2, 4, 6, 18, 26, 28, 41, 42, 44, 47, 52, 53, 60, 67, 80, 82, 85, 88, 89, 92],
+    5: [7, 8, 12, 17, 30, 34, 35, 36, 40, 50, 59, 66, 71, 72, 75, 76, 83, 91, 94, 98],
+}
+_STIM_TO_FOLD = {s: f for f, stims in IMAGE_CV_FOLDS.items() for s in stims}
+
+
 def leave_one_image_out(epochs, n_splits=5, seed=0):
-    """Group by stimulus id, stratified by category, holding out all repeats of test images"""
-    y = _y(epochs)
-    groups = epochs.metadata["stim_id"].to_numpy()
-    Xd = np.zeros((len(y), 1))
-    return list(StratifiedGroupKFold(n_splits, shuffle=True, random_state=seed).split(Xd, y, groups))
+    if n_splits != 5:
+        raise ValueError(f"IMAGE_CV_FOLDS defines exactly 5 fixed folds; got n_splits={n_splits}")
+    stim = epochs.metadata["stim_id"].to_numpy()
+    missing = sorted(set(stim.tolist()) - _STIM_TO_FOLD.keys())
+    if missing:
+        raise ValueError(
+            f"stim_id(s) {missing} are not in the fixed faceshouses image-fold map; "
+            "leave_one_image_out is defined only for the 100 faceshouses images"
+        )
+    fold_of = np.array([_STIM_TO_FOLD[s] for s in stim])
+    return [(np.where(fold_of != f)[0], np.where(fold_of == f)[0]) for f in range(1, 6)]
 
 
 def leave_one_run_out(epochs):
