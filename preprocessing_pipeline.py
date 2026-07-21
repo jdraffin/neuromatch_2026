@@ -160,7 +160,13 @@ def to_raw(mat_path, notch=notch, bandpass=bandpass):
 
     picks = mne.pick_types(raw.info, ecog=True)
     if notch:
-        raw.notch_filter([f for f in notch if f < sf / 2], picks=picks)
+        # 3rd-order Butterworth, applied forward-backward (phase="zero" -> zero-phase filtfilt).
+        # MNE's IIR path takes one stop-band at a time, so the harmonics are looped over.
+        for f in notch:
+            if f < sf / 2:
+                raw.notch_filter([f], picks=picks, method="iir",
+                                 iir_params=dict(order=3, ftype="butter", output="sos"),
+                                 phase="zero")
     if bandpass:
         raw.filter(bandpass[0], bandpass[1], picks=picks)
 
@@ -168,8 +174,22 @@ def to_raw(mat_path, notch=notch, bandpass=bandpass):
 
 
 # %% Run detection
-def _run_index(stim, onsets, min_gap_samples=2000):
-    """Assign each stimulus onset to a run using the stim==0 gaps between runs"""
+# Subjects whose runs were concatenated WITHOUT the usual inter-run silence, so the
+# gap-based detector below sees a single run. The faceshouses design is 3 runs x 100
+# trials for every subject (verified: all 7 Miller subjects have 300 onsets, and the six
+# detectable ones split exactly 100/100/100 at two ~9080-sample stim==0 gaps). `ha` has
+# only the trailing gap, so its boundaries are recovered from the known trial count.
+# value = number of equal, contiguous runs to split the onsets into.
+RUN_OVERRIDES = {"ha": 3}
+
+
+def _run_index(stim, onsets, min_gap_samples=2000, subject=None):
+    """Assign each stimulus onset to a run using the stim==0 gaps between runs.
+
+    `subject` enables the RUN_OVERRIDES fallback: if the gap detector finds no run
+    boundary for a subject known to have concatenated runs, split the onsets into equal
+    contiguous blocks in acquisition order. Without `subject` the behaviour is unchanged.
+    """
     stim = np.asarray(stim).astype(int)
     chg = np.where(np.diff(stim) != 0)[0] + 1
     starts = np.concatenate([[0], chg])
@@ -180,6 +200,10 @@ def _run_index(stim, onsets, min_gap_samples=2000):
     for g in gap_starts:
         run[onsets > g] += 1
 
+    n_forced = RUN_OVERRIDES.get(subject)
+    if n_forced and len(np.unique(run)) == 1 and len(onsets) % n_forced == 0:
+        per = len(onsets) // n_forced           # onsets are in acquisition order
+        run = np.arange(len(onsets), dtype=int) // per
     return run
 
 
@@ -218,7 +242,7 @@ def preprocess(subject, task="faceshouses", dataset=DATASET, root=None,
         meta = pd.DataFrame({
             "stim_id": codes,
             "category": np.where(codes <= 50, "house", "face"),
-            "run": _run_index(stim, events[:, 0]),
+            "run": _run_index(stim, events[:, 0], subject=subject),
         })
     elif task == "fhnoisy":
         events = events[events[:, 2] >= 1]
