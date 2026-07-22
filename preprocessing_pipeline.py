@@ -17,10 +17,33 @@ DATASETS = {
     "faces_basic": Path(r"C:\Users\Jonny\Neuromatch\Project\dataset\faces_basic\data"),
     "faces_noise": Path(r"C:\Users\Jonny\Neuromatch\Project\dataset\faces_noise\data"),
 }
+# THE CANONICAL COHORT. The seven subjects of Miller et al. 2016, PLoS Comput Biol
+# 12(1):e1004660, in paper subject order 1-7. This is the default cohort for ALL analyses:
+# it is the published sample, every one of these subjects appears in the paper's figures, and
+# results on it are directly comparable to the literature.
+#
+# Source of record: dataset/faces_basic/README_faces_basic_dataset_notes.docx - Miller's own
+# data-release note - which states "The corresponding subject number for each patient from the
+# manuscript is: ja 1, ca 2, mv 3, wc 4, de 5, zt 6, fp 7".
+# miller_subject_mapping_and_exclusions.xlsx agrees on membership; it numbers mv/wc/zt
+# differently and its own Notes column flags that uncertainty, so prefer the README.
+#
+# BEWARE two other 7-element sets in this project that are NOT this one:
+#   * SUBJECTS["faces_noise"] below (ap ca ha ja mv wc zt) - the fhnoisy cohort, which differs
+#     from MILLER7 on de/fp vs ap/ha. dmd_python/pair_common.py:SUBS is a copy of it.
+#   * SUBJECTS_EXTRA below (aa ap ha jm jt rn rr) - faces_basic subjects NOT in the paper.
+MILLER7 = ["ja", "ca", "mv", "wc", "de", "zt", "fp"]
+
+# The seven faces_basic subjects that are not in the 2016 paper. Kept for robustness checks
+# and for anything that wants the full folder; not part of the default cohort.
+SUBJECTS_EXTRA = ["aa", "ap", "ha", "jm", "jt", "rn", "rr"]
+SUBJECTS_ALL14 = sorted(MILLER7 + SUBJECTS_EXTRA)
+
 SUBJECTS = {
-    "faces_basic": ["aa", "ap", "ca", "de", "fp", "ha", "ja", "jm", "jt", "mv", "rn", "rr", "wc", "zt"],
+    "faces_basic": MILLER7,          # default = the published cohort, NOT all 14
     "faces_noise": ["ap", "ca", "ha", "ja", "mv", "wc", "zt"],
 }
+COHORTS = {"miller7": MILLER7, "extra7": SUBJECTS_EXTRA, "all14": SUBJECTS_ALL14}
 DATASET = "faces_basic"
 data_root = DATASETS[DATASET]
 subjects = SUBJECTS[DATASET]
