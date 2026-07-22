@@ -14,7 +14,7 @@ Fidelity notes (deliberate, and the only places this departs from the .m):
   * fitlme -> statsmodels MixedLM. MATLAB's fitlme defaults to ML; we pass reml=False to
     match. MATLAB reports `tStat`; statsmodels' `.tvalues` are Wald z. For the n used here
     (>=200 trials) these coincide to ~3 decimals, but the cluster statistic is therefore
-    sum(z^2) not sum(t^2). Verified equivalent on the reference data (see test at bottom).
+    sum(z^2) not sum(t^2).
   * MATLAB `Coefficients` always drops the intercept via `(2:end)`. We drop the term named
     'Intercept' explicitly, which is the same set for the formulas used here.
   * numFixedEffects = NumCoefficients-1 counts COEFFICIENTS, not model terms, so a
@@ -28,6 +28,40 @@ Fidelity notes (deliberate, and the only places this departs from the .m):
 
 NOT ported: the 'burstRate' logistic/Poisson branch (we have no burst data) and
 clusterBasedGlmeERD2D.m. `cluster_definition='uniqueCombos'` IS ported.
+
+Only ONE random intercept is supported, passed as `groups`. That covers the paper's
+per-channel model and its first three group models, including the one their example script
+selects as best ('erd ~ eventType + novelRepeat + (1|allChannelNumbers)'). Their hierarchical
+group model and their alternative models need two crossed or nested random intercepts
+(e.g. '+ (1|allChannelNumbers) + (1|eventValue)'); those would need a vc_formula path here
+and are NOT available.
+
+VALIDATION (scr_331_validate_koenig_port.py, run 2026-07-22)
+------------------------------------------------------------
+An earlier version of this docstring claimed the port was "verified equivalent on the
+reference data (see test at bottom)". There was no test at the bottom, and
+reference_koenig2024_matlab/ shipped no data, so nothing supported that claim. It has now
+been checked properly.
+
+The authors' example file (exampleGlmeFaceHouseAnalysisData.mat, Zenodo 10.5281/zenodo.7703148,
+CC BY-4.0) is derived from Miller's faces_basic library, which we already hold. Its event
+tables are MATLAB `table` objects that neither scipy.io nor pymatreader can decode, so the
+source channel was identified by correlation instead and its event table regenerated from
+that subject's own stim vector: selectedBBData{1} is subject jm, ecog12, all 300 trials in
+acquisition order (trial-mean r = 1.000 against dmdsdm.miller_broadband; full trial x time
+r = 0.984, the residual being their per-channel z-scoring).
+
+Run at their own published parameters -- 'erd ~ eventType + novelRepeat + (1|eventValue)',
+alphaIndividual 0.04, minClusterSize 55 ms, numShuffs 1000, window -200..600 ms -- this port
+returns significantGlmeFit == 1 with exactly two significant clusters, +144..+382 ms
+(sum t^2 = 35.4) and +461..+523 ms (sum t^2 = 8.6). That matches the result
+exampleFaceHouseAnlaysisBB.m expects: it titles the panel "Significant Channel" and indexes
+sigGlmes{1}{1} and sigGlmes{1}{2}, i.e. two significant clusters.
+
+Caveat on how strong that is: the authors publish no table of cluster boundaries or p-values,
+and MATLAB is not available here, so the agreement checked is the count and significance of
+clusters, not their exact edges. A boundary difference of a few ms from optimizer or
+z-vs-t differences would not be detected.
 """
 
 import numpy as np
